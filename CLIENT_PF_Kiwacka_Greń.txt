@@ -1,0 +1,619 @@
+-- [FUNKCJE]
+create or replace FUNCTION CHECK_RANK(p_klient_id IN INTEGER) RETURN VARCHAR2 
+IS 
+	total_cost NUMBER(12, 3); 
+	ranking INTEGER := 1; 
+	v_result VARCHAR2(4000 CHAR); 
+	v_third_highest_cost NUMBER(12, 3); 
+	v_diference NUMBER(12, 3); 
+BEGIN 
+    SELECT NVL(SUM(oc.cost), 0) 
+    INTO total_cost 
+    FROM orders o 
+    JOIN order_cost oc ON o.id_order = oc.orders_id_order 
+    WHERE o.klienci_id_klienta = p_klient_id; 
+ 
+	SELECT cost 
+    INTO v_third_highest_cost 
+    FROM ( 
+        SELECT cost, RANK() OVER (ORDER BY cost DESC) rnk 
+        FROM ( 
+            SELECT klienci_id_klienta, SUM(oc.cost) AS cost 
+            FROM orders o 
+            JOIN order_cost oc ON o.id_order = oc.orders_id_order 
+            GROUP BY klienci_id_klienta 
+        ) 
+    ) 
+    WHERE rnk = 3; 
+ 
+ 
+    FOR order_rec IN( 
+        SELECT klienci, sum_cost 
+        FROM ( 
+            SELECT klienci_id_klienta AS klienci, SUM(oc.cost) AS sum_cost 
+            FROM orders o 
+            JOIN order_cost oc ON o.id_order = oc.orders_id_order 
+            GROUP BY klienci_id_klienta 
+            ORDER BY sum_cost DESC 
+        ) 
+    ) 
+    LOOP 
+        IF total_cost < order_rec.sum_cost THEN 
+            IF order_rec.klienci = p_klient_id THEN 
+				ranking := ranking; 
+			ELSE 
+				ranking := ranking + 1; 
+			END IF; 
+		ELSE 
+			EXIT; 
+        END IF; 
+    END LOOP; 
+ 
+	IF v_third_highest_cost <= total_cost THEN 
+		v_result := TO_CHAR(total_cost) || ' ' || TO_CHAR(ranking) || ' ' || 'NULL'; 
+	ELSE 
+		v_diference := v_third_highest_cost - total_cost + 1; 
+		v_result := TO_CHAR(total_cost) || ' ' || TO_CHAR(ranking) || ' ' || TO_CHAR(v_diference); 
+	END IF; 
+ 
+    RETURN v_result; 
+END CHECK_RANK; 
+/
+
+
+
+
+
+
+
+
+
+
+create or replace TYPE POFKlient AS OBJECT( 
+    ID INTEGER, 
+    Produkt VARCHAR2(50 CHAR), 
+    Kategoria VARCHAR2(50 CHAR), 
+    Ilosc INTEGER, 
+    Koszt NUMBER(8,2), 
+    Dostepnosc VARCHAR2(20 CHAR), 
+    Zamow VARCHAR(80 CHAR) 
+); 
+/
+create or replace TYPE POFK AS TABLE OF POFKlient; 
+/
+
+create or replace FUNCTION C_PenOrders (p_klient_id IN INTEGER)RETURN POFK PIPELINED 
+AS 
+    CURSOR KURSOR_PO(id_klienta INTEGER) IS 
+        SELECT * FROM Pending_Orders WHERE klienci_id_klienta = id_klienta; 
+     
+    POrders Pending_Orders%ROWTYPE; 
+    v_available_quantity towar_quantity.quantity%TYPE; 
+    v_towar_name towar.name%TYPE; 
+    v_dostepnosc VARCHAR2(20 CHAR); 
+    v_zamow VARCHAR2(80 CHAR); 
+    v_kategoria VARCHAR2(50 CHAR); 
+    v_koszt NUMBER(8,2); 
+ 
+BEGIN 
+    OPEN KURSOR_PO(p_klient_id); 
+ 
+    LOOP 
+        FETCH KURSOR_PO INTO POrders; 
+         
+        EXIT WHEN KURSOR_PO%NOTFOUND; 
+ 
+        -- Pobranie nazwy towaru 
+        SELECT name INTO v_towar_name 
+        FROM towar 
+        WHERE id_towaru = POrders.towar_id_towaru; 
+ 
+        -- Pobranie kategorii towaru 
+        SELECT cat_name INTO v_kategoria 
+        FROM pr_cat 
+        WHERE id_cat = ( 
+            SELECT pr_type_cat_pr_cat_id_cat 
+            FROM towar_pr_t_c 
+            WHERE towar_id_towaru = POrders.towar_id_towaru 
+        ); 
+ 
+        -- Pobranie kosztu za sztukę towaru 
+        SELECT cost INTO v_koszt 
+        FROM towar_cost 
+        WHERE towar_id_towaru = POrders.towar_id_towaru; 
+ 
+        -- Sprawdzenie dostępności towaru 
+        SELECT quantity INTO v_available_quantity 
+        FROM towar_quantity 
+        WHERE towar_id_towaru = POrders.towar_id_towaru; 
+ 
+        IF v_available_quantity >= POrders.quantity THEN 
+            v_dostepnosc := 'Dostępne'; 
+            v_zamow := 'Kliknij aby zamówić'; 
+        ELSE 
+            v_dostepnosc := 'Niedostępne'; 
+            v_zamow := 'Brak możliwości zamówienia'; 
+        END IF; 
+ 
+        -- Dodanie obiektu do kolekcji PIPELINED 
+        PIPE ROW(POFKlient( 
+            POrders.id_pending_order, 
+            v_towar_name, 
+            v_kategoria, 
+            POrders.quantity, 
+            POrders.quantity * v_koszt, -- Obliczenie kosztu na podstawie ilości 
+            v_dostepnosc, 
+            v_zamow 
+        )); 
+    END LOOP; 
+ 
+    CLOSE KURSOR_PO; 
+ 
+    RETURN; 
+END C_PenOrders; 
+/
+
+
+
+
+
+
+
+
+
+
+create or replace FUNCTION TOP_CLIENTS(klient_id IN INTEGER) RETURN BOOLEAN 
+IS 
+    isTOP BOOLEAN := FALSE; 
+    total_cost NUMBER := 0; 
+BEGIN 
+    --Suma kosztów wszystkich zamówień klienta 
+    SELECT NVL(SUM(oc.cost), 0) 
+    INTO total_cost FROM orders o 
+    JOIN order_cost oc ON o.id_order = oc.orders_id_order 
+    WHERE o.klienci_id_klienta = klient_id; 
+ 
+    --Porównanie z 3 największymi sumami 
+    FOR order_rec IN( 
+        SELECT sum_cost 
+        FROM ( 
+            SELECT klienci_id_klienta, SUM(oc.cost) AS sum_cost 
+            FROM orders o 
+            JOIN order_cost oc ON o.id_order = oc.orders_id_order 
+            GROUP BY klienci_id_klienta 
+            ORDER BY sum_cost DESC 
+        ) 
+        WHERE ROWNUM <= 3 
+    ) 
+ 
+    LOOP 
+        IF total_cost >= order_rec.sum_cost THEN 
+            isTOP := TRUE; 
+            EXIT; 
+        END IF; 
+    END LOOP; 
+ 
+    RETURN isTOP; 
+ 
+END TOP_CLIENTS; 
+/
+
+
+
+
+
+
+
+
+
+
+create or replace FUNCTION GET_TOP_ORDER_PR_ID( 
+    p_klient_id IN INTEGER, 
+    p_n                IN INTEGER 
+) RETURN INTEGER 
+IS 
+    v_towar_id_towaru INTEGER; 
+    v_total_costs      SYS_REFCURSOR; 
+    v_result           VARCHAR2(100); 
+	v_towar_name	   VARCHAR2(100); 
+BEGIN 
+    -- Pobierz sumę kosztów zamówień dla każdego towaru danego klienta 
+    OPEN v_total_costs FOR 
+        SELECT o.towar_id_towaru, SUM(oc.cost) AS total_cost 
+        FROM orders o 
+             JOIN order_cost oc ON o.id_order = oc.orders_id_order 
+        WHERE o.klienci_id_klienta = p_klient_id 
+        GROUP BY o.towar_id_towaru 
+        ORDER BY total_cost DESC; 
+ 
+    -- Wybierz n-ty towar 
+    FOR i IN 1..p_n LOOP 
+        FETCH v_total_costs INTO v_towar_id_towaru, v_result; 
+    END LOOP; 
+ 
+    -- Zamknij kursor 
+    CLOSE v_total_costs; 
+ 
+	--SELECT name INTO v_towar_name FROM towar WHERE id_towaru = v_towar_id_towaru; 
+ 
+    -- Zwróć rezultat 
+    RETURN v_towar_id_towaru; 
+END GET_TOP_ORDER_PR_ID; 
+/
+
+
+
+
+
+
+
+
+
+
+create or replace TYPE PR_TABLE AS OBJECT( 
+	udzial VARCHAR2(200 CHAR), 
+	percent NUMBER(12, 2) 
+); 
+/
+
+create or replace TYPE PRTable AS TABLE OF PR_TABLE; 
+/
+
+create or replace FUNCTION CALC_PERCENT( 
+    p_towar_id_towaru    IN INTEGER, 
+    p_klienci_id_klienta IN INTEGER 
+) RETURN PRTable 
+IS 
+    v_total_quantity       INTEGER; 
+    v_customer_quantity    INTEGER; 
+    v_other_customers_qty  INTEGER; 
+    v_customer_percentage  NUMBER(12 , 2); 
+    v_other_customers_pct NUMBER(12, 2); 
+    v_result               PRTable := PRTable(); 
+BEGIN 
+    -- Pobierz sumę ilości zamówionego towaru ogółem 
+    SELECT SUM(quantity) 
+    INTO v_total_quantity 
+    FROM orders 
+    WHERE towar_id_towaru = p_towar_id_towaru; 
+ 
+    -- Pobierz sumę ilości zamówionego towaru przez danego klienta 
+    SELECT SUM(quantity) 
+    INTO v_customer_quantity 
+    FROM orders 
+    WHERE towar_id_towaru = p_towar_id_towaru AND klienci_id_klienta = p_klienci_id_klienta; 
+ 
+    -- Oblicz % ilości zamówionego towaru przez danego klienta 
+    IF v_total_quantity > 0 THEN 
+        v_customer_percentage := (v_customer_quantity / v_total_quantity) * 100; 
+    ELSE 
+        v_customer_percentage := 0; 
+    END IF; 
+ 
+    -- Oblicz % ilości zamówionego towaru przez resztę klientów 
+    v_other_customers_qty := v_total_quantity - v_customer_quantity; 
+    IF v_total_quantity > 0 THEN 
+        v_other_customers_pct := (v_other_customers_qty / v_total_quantity) * 100; 
+    ELSE 
+        v_other_customers_pct := 0; 
+    END IF; 
+ 
+    -- Wypełnij tablicę PRTable 
+    v_result := PRTable( 
+        PR_TABLE('Twój udział', v_customer_percentage), 
+        PR_TABLE('Reszta klientów ', v_other_customers_pct) 
+    ); 
+ 
+    -- Zwróć tablicę PRTable 
+    RETURN v_result; 
+END CALC_PERCENT; 
+/
+
+
+
+
+
+
+
+
+
+
+-- [PROCEDURY]
+create or replace PROCEDURE K_Order( 
+    v_klient_id IN INTEGER, 
+    v_towar_id IN INTEGER, 
+    p_quantity IN INTEGER 
+) 
+IS 
+    v_towar_quantity INTEGER; 
+    v_towar_cost NUMBER(8, 2); 
+    v_staff_id INTEGER; 
+    v_cost NUMBER(8, 2); 
+    v_neworder_id INTEGER; 
+	v_missing_goods_id INTEGER; 
+	v_existing_quantity INTEGER; 
+BEGIN 
+    --SELECT id_towaru INTO v_towar_id 
+    --FROM towar 
+    --WHERE towar.name = p_towar_name; 
+ 
+    SELECT quantity INTO v_towar_quantity 
+    FROM towar_quantity 
+    WHERE towar_id_towaru = v_towar_id; 
+ 
+    SELECT cost INTO v_towar_cost 
+    FROM towar_cost 
+    WHERE towar_id_towaru = v_towar_id; 
+ 
+    --SELECT id_klienta INTO v_klient_id 
+    --FROM klienci 
+    --WHERE co_name = p_klient; 
+ 
+    IF v_towar_quantity >= p_quantity THEN 
+        SELECT id_worker INTO v_staff_id 
+        FROM staff 
+        ORDER BY DBMS_RANDOM.VALUE 
+        FETCH FIRST 1 ROWS ONLY; 
+ 
+        SELECT MAX(id_order) + 1 INTO v_neworder_id FROM orders;  
+ 
+        --Dodanie zamówienia do tabeli orders 
+        INSERT INTO orders ( 
+            id_order, 
+            quantity, 
+            towar_id_towaru, 
+            klienci_id_klienta, 
+            staff_id_worker 
+        ) VALUES ( 
+            v_neworder_id, 
+            p_quantity, 
+            v_towar_id, 
+            v_klient_id, 
+            v_staff_id 
+        ); 
+ 
+        --Dodanie daty zamówienia do tabeli order_dates 
+        INSERT INTO order_dates ( 
+            order_date, 
+            order_time, 
+            realization_date, 
+            realization_time, 
+            orders_id_order 
+        ) VALUES ( 
+            CURRENT_DATE, 
+            CURRENT_TIMESTAMP, 
+            NULL, 
+            NULL, 
+            v_neworder_id 
+        ); 
+ 
+        --Dodanie kosztu i metodu płatności do tabeli order_cost 
+        IF TOP_CLIENTS(v_klient_id) THEN 
+            v_cost := 0.8 * v_towar_cost * p_quantity; 
+        ELSE 
+            v_cost := v_towar_cost * p_quantity; 
+        END IF; 
+ 
+        INSERT INTO order_cost ( 
+            cost, 
+            payment, 
+            orders_id_order 
+        ) VALUES ( 
+            v_cost, 
+            0, 
+            v_neworder_id 
+        ); 
+ 
+        --Odjęcie zamówionej ilość z dostępnej ilości danego produktu 
+        UPDATE towar_quantity SET quantity = quantity - p_quantity 
+        WHERE towar_id_towaru = v_towar_id; 
+ 
+		apex_application.g_print_success_message := '<span style="color:white">Zamówienie zostało złożone!</span>'; 
+ 
+    ELSE 
+		BEGIN 
+        	SELECT id_missing_goods INTO v_missing_goods_id 
+        	FROM Missing_Goods 
+        	WHERE towar_id_towaru = v_towar_id; 
+ 
+    	EXCEPTION 
+        	WHEN NO_DATA_FOUND THEN 
+            	v_missing_goods_id := NULL; 
+    	END; 
+ 
+		IF v_missing_goods_id IS NOT NULL THEN 
+			SELECT quantity INTO v_existing_quantity FROM Missing_Goods WHERE towar_id_towaru = v_towar_id; 
+			UPDATE Missing_Goods SET quantity = v_existing_quantity + p_quantity * 1.2 WHERE towar_id_towaru = v_towar_id; 
+		ELSE 
+        --Dodanie brakującego towaru do tabeli Missing Goods 
+        	INSERT INTO Missing_Goods ( 
+            	towar_id_towaru, 
+            	quantity 
+        	) VALUES ( 
+            	v_towar_id, 
+            	p_quantity * 1.5 
+        	); 
+		END IF; 
+ 
+        --Dodanie zamówienia do oczekujących 
+        INSERT INTO Pending_Orders ( 
+            quantity, 
+            towar_id_towaru, 
+            klienci_id_klienta 
+        ) VALUES ( 
+            p_quantity, 
+            v_towar_id, 
+            v_klient_id 
+        ); 
+ 
+        --Komunikat o braku dostępności towaru 
+		apex_application.g_print_success_message := '<span style="color:yellow">Brak towaru w bazie lub brak wystarczającej ilości towaru!<br /> Zamówienie zostało dodane do oczekujących.</span>'; 
+        --APEX_ERROR.ADD_ERROR( 
+            --p_message => 'Brak towaru w bazie lub brak wystarczającej ilości towaru! Zamówienie zostało dodane do oczekujących.', 
+            --p_display_location => APEX_ERROR.c_inline_in_notification); 
+    END IF; 
+ 
+    EXCEPTION WHEN NO_DATA_FOUND THEN RAISE_APPLICATION_ERROR(-20001, 'Podano niepoprawny numer towaru!'); 
+ 
+END K_Order; 
+/
+
+
+
+
+
+
+
+
+
+
+create or replace PROCEDURE TOP_PRODUCTS AS 
+BEGIN 
+	htp.p('<style> 
+		table{ 
+			border: 3px solid #056ac8; 
+			width: 100%; 
+			border-collapse: collapse; 
+		} 
+		table td{ 
+			padding: 15px; 
+			border: 1px solid #3f3f3f; 
+			border-collapse: collapse; 
+		} 
+		table th{ 
+			padding: 15px; 
+			border: 1px solid #3f3f3f; 
+			border-collapse: collapse; 
+			background: #056ac8; 
+			color: white; 
+		} 
+	</style>'); 
+	htp.p('<table><tr><th><strong>ID</strong></th><th><strong>Nazwa produktu</strong></th><th><strong>Kategoria</strong></th><th><strong>Producent</strong></th><th><strong>Dostępna Ilość</strong></th><th><strong>Cena (za 1 szt.)</strong></th><th><strong>Sprzedana ilość</strong></th></tr>'); 
+    FOR rec IN( 
+        SELECT * 
+        FROM( 
+            SELECT 
+                t.id_towaru,  
+                t.name AS NazwaTowaru, 
+                pc.cat_name AS KategoriaTowaru, 
+                tc.cost AS KosztTowaru, 
+                tq.quantity AS DostepnaIlosc, 
+                p.co_name AS Producent, 
+				SUM(o.quantity) AS LiczbaZamowien 
+            FROM towar t 
+				JOIN orders o ON o.towar_id_towaru = t.id_towaru 
+                JOIN towar_cost tc ON t.id_towaru = tc.towar_id_towaru 
+                JOIN towar_pr_t_c tptc ON t.id_towaru = tptc.towar_id_towaru 
+                JOIN pr_cat pc ON tptc.pr_type_cat_pr_cat_id_cat = pc.id_cat 
+                JOIN twoar_producent tp ON t.id_towaru = tp.towar_id_towaru 
+                JOIN producent p ON tp.producent_id_prod = p.id_prod 
+                JOIN towar_quantity tq ON t.id_towaru = tq.towar_id_towaru 
+            GROUP BY  
+				t.id_towaru, t.name, pc.cat_name, p.co_name, tq.quantity, tc.cost 
+			ORDER BY LiczbaZamowien DESC 
+        ) 
+		WHERE ROWNUM <= 5 
+    ) 
+    LOOP 
+        htp.p('<tr><td>' || rec.id_towaru || '</td><td>' || rec.NazwaTowaru || '</td><td>' || rec.KategoriaTowaru || '</td><td>' || rec.Producent || '</td><td>' || rec.DostepnaIlosc || '</td><td>' || rec.KosztTowaru || ' zł</td><td>' || rec.LiczbaZamowien || '</td></tr>'); 
+    END LOOP; 
+	htp.p('</table>'); 
+END; 
+/
+
+
+
+
+
+
+
+
+
+
+create or replace PROCEDURE REORDER(p_id_order IN INTEGER) 
+IS 
+	v_towar_id INTEGER; 
+	v_klient_id INTEGER; 
+	v_quantity INTEGER; 
+	v_mg_quantity INTEGER; 
+	v_new_quantity INTEGER; 
+BEGIN 
+	--Klient, który zamawia 
+	SELECT klienci_id_klienta 
+	INTO v_klient_id 
+	FROM Pending_Orders 
+	WHERE id_pending_order = p_id_order; 
+	 
+	--Towar który zamawia i jego ilość 
+	SELECT towar_id_towaru, quantity 
+	INTO v_towar_id, v_quantity 
+	FROM Pending_Orders 
+	WHERE id_pending_order = p_id_order; 
+ 
+	DELETE FROM Pending_Orders 
+    WHERE id_pending_order = p_id_order; 
+ 
+	SELECT quantity 
+    INTO v_mg_quantity 
+    FROM Missing_Goods 
+    WHERE towar_id_towaru = v_towar_id; 
+ 
+    v_new_quantity := v_mg_quantity - v_quantity; 
+ 
+    IF v_new_quantity <= 0 THEN 
+        DELETE FROM Missing_Goods 
+        WHERE towar_id_towaru = v_towar_id; 
+    ELSE 
+        UPDATE Missing_Goods 
+        SET quantity = v_new_quantity 
+        WHERE towar_id_towaru = v_towar_id; 
+    END IF; 
+ 
+	K_Order(v_klient_id, v_towar_id, v_quantity); 
+ 
+END REORDER; 
+/
+
+
+
+
+
+
+
+
+
+
+create or replace PROCEDURE CANCLE_ORDER(p_id_order IN INTEGER) 
+IS 
+    v_towar_id INTEGER; 
+    v_towar_quantity INTEGER; 
+    v_mg_quantity INTEGER; 
+    v_new_quantity INTEGER; 
+BEGIN 
+    SELECT towar_id_towaru, quantity 
+    INTO v_towar_id, v_towar_quantity 
+    FROM Pending_Orders 
+    WHERE id_pending_order = p_id_order; 
+ 
+    DELETE FROM Pending_Orders 
+    WHERE id_pending_order = p_id_order; 
+ 
+    SELECT quantity 
+    INTO v_mg_quantity 
+    FROM Missing_Goods 
+    WHERE towar_id_towaru = v_towar_id; 
+ 
+    v_new_quantity := v_mg_quantity - v_towar_quantity; 
+ 
+    IF v_new_quantity <= 0 THEN 
+        DELETE FROM Missing_Goods 
+        WHERE towar_id_towaru = v_towar_id; 
+    ELSE 
+        UPDATE Missing_Goods 
+        SET quantity = v_new_quantity 
+        WHERE towar_id_towaru = v_towar_id; 
+    END IF; 
+ 
+    apex_application.g_print_success_message := '<span style="color:white">Zamówienie zostało anulowane!</span>'; 
+END CANCLE_ORDER; 
+/

@@ -1,0 +1,578 @@
+--[FUNKCJE]
+create or replace FUNCTION CheckMissingGoods(p_towar_id IN INTEGER) RETURN BOOLEAN 
+IS 
+    v_exists BOOLEAN := FALSE; 
+    CURSOR c_missing_goods IS 
+        SELECT towar_id_towaru 
+        FROM Missing_Goods; 
+BEGIN 
+    FOR rec IN c_missing_goods 
+    LOOP 
+        IF rec.towar_id_towaru = p_towar_id THEN 
+            v_exists := TRUE; 
+            EXIT; 
+        END IF; 
+    END LOOP; 
+ 
+    RETURN v_exists; 
+END CheckMissingGoods; 
+/
+
+
+
+
+
+
+
+
+
+
+create or replace FUNCTION check_quantity(towar IN INTEGER, p_quantity IN INTEGER) RETURN BOOLEAN IS 
+    v_required_quantity INTEGER; 
+BEGIN 
+    SELECT quantity INTO v_required_quantity 
+    FROM missing_goods 
+    WHERE towar_id_towaru = towar; 
+ 
+    IF p_quantity >= v_required_quantity THEN 
+        RETURN TRUE; 
+    ELSE 
+        RETURN FALSE; 
+    END IF; 
+END; 
+/
+
+
+
+
+
+
+
+
+
+
+create or replace TYPE MG AS OBJECT( 
+    ID INTEGER, 
+    Produkt VARCHAR2(50 CHAR), 
+    Ilosc INTEGER, 
+    IloscZamowien INTEGER 
+); 
+/
+
+create or replace TYPE MGTable AS TABLE OF MG; 
+/
+
+
+create or replace FUNCTION GenerateMG RETURN MGTable 
+IS 
+    v_MGTable MGTable := MGTable(); 
+BEGIN 
+    SELECT MG( 
+               mg.id_missing_goods, 
+               t.name, 
+               mg.quantity, 
+               (SELECT COUNT(po.id_pending_order)  
+                FROM Pending_Orders po  
+                WHERE po.towar_id_towaru = mg.towar_id_towaru) 
+           ) 
+    BULK COLLECT INTO v_MGTable 
+    FROM Missing_Goods mg 
+    JOIN towar t ON mg.towar_id_towaru = t.id_towaru; 
+ 
+    RETURN v_MGTable; 
+END GenerateMG; 
+/
+
+
+
+
+
+
+
+
+
+
+create or replace TYPE KH AS OBJECT( 
+	id_order INTEGER, 
+	t_name VARCHAR(50), 
+	t_cat VARCHAR(50), 
+	quantity INTEGER, 
+	cena NUMBER(8, 2), 
+	pracownik VARCHAR(80), 
+	order_date DATE 
+); 
+/
+
+create or replace TYPE KHistory AS TABLE OF KH; 
+/
+
+create or replace FUNCTION KOHistory(p_klient_id INTEGER) RETURN KHistory 
+IS 
+    V_KHistory KHistory := KHistory(); 
+BEGIN 
+    SELECT 
+        KH( 
+            o.id_order, 
+            t.name, 
+            pc.cat_name, 
+            o.quantity, 
+            o.quantity * tc.cost, 
+            s.surname, 
+            od.order_date 
+        ) 
+    BULK COLLECT INTO V_KHistory 
+    FROM orders o 
+    JOIN order_dates od ON o.id_order = od.orders_id_order 
+    JOIN towar t ON o.towar_id_towaru = t.id_towaru 
+    JOIN towar_pr_t_c prtc ON t.id_towaru = prtc.towar_id_towaru 
+    JOIN pr_cat pc ON prtc.pr_type_cat_pr_cat_id_cat = pc.id_cat 
+    JOIN klienci k ON o.klienci_id_klienta = k.id_klienta 
+    JOIN towar_quantity tq ON t.id_towaru = tq.towar_id_towaru 
+    JOIN towar_cost tc ON t.id_towaru = tc.towar_id_towaru 
+    JOIN staff s ON o.staff_id_worker = s.id_worker  
+    WHERE o.klienci_id_klienta = p_klient_id; 
+ 
+    IF V_KHistory.COUNT = 0 THEN 
+        APEX_ERROR.ADD_ERROR( 
+            p_message =>'Wybrany klienta nie złożył jeszcze żadnego zamówienia!', 
+            p_display_location => apex_error.c_inline_in_notification); 
+    END IF; 
+ 
+    RETURN V_KHistory; 
+END KOHistory; 
+/
+
+
+
+
+
+
+
+
+
+
+create or replace TYPE LOIDs AS OBJECT( 
+	id_order INTEGER, 
+	klient VARCHAR(80), 
+	t_name VARCHAR(50), 
+	t_cat VARCHAR(50), 
+	quantity INTEGER, 
+	cena NUMBER(8, 2), 
+	pracownik VARCHAR(80), 
+	order_date DATE 
+); 
+/
+
+create or replace TYPE vLOIDs AS TABLE OF LOIDs; 
+/
+
+create or replace FUNCTION LATEST_ORDERS(p_order_date DATE) RETURN vLOIDs 
+IS 
+    V_LOIDs vLOIDs := vLOIDs(); 
+BEGIN 
+    SELECT 
+        LOIDs( 
+            o.id_order, 
+            k.co_name, 
+            t.name, 
+            pc.cat_name, 
+            o.quantity, 
+            oc.cost, 
+            s.surname, 
+            od.order_date 
+        ) 
+    BULK COLLECT INTO V_LOIDs 
+    FROM orders o 
+    JOIN order_dates od ON o.id_order = od.orders_id_order 
+    JOIN towar t ON o.towar_id_towaru = t.id_towaru 
+    JOIN towar_pr_t_c prtc ON t.id_towaru = prtc.towar_id_towaru 
+    JOIN pr_cat pc ON prtc.pr_type_cat_pr_cat_id_cat = pc.id_cat 
+    JOIN klienci k ON o.klienci_id_klienta = k.id_klienta 
+    JOIN order_cost oc ON o.id_order = oc.orders_id_order 
+    JOIN staff s ON o.staff_id_worker = s.id_worker  
+    WHERE od.order_date > p_order_date; 
+ 
+    IF V_LOIDs.COUNT = 0 THEN 
+        APEX_ERROR.ADD_ERROR( 
+            p_message =>'Podano nieprawidłową datę, lub nie ma zamówień złożonych po tej dacie.', 
+            p_display_location => apex_error.c_inline_in_notification); 
+    END IF; 
+ 
+    RETURN V_LOIDs; 
+END LATEST_ORDERS; 
+/
+
+
+
+
+
+
+
+
+
+
+-- [PROCEDURY]
+create or replace PROCEDURE ADD_CLIENT (
+    p_co_name IN VARCHAR2,
+    p_ceo IN VARCHAR2,
+    p_nip IN VARCHAR2,
+    p_building_no IN INTEGER,
+    p_city IN VARCHAR2,
+    p_street IN VARCHAR2,
+    p_postal_code IN VARCHAR2
+)
+IS
+    v_id_klienta INTEGER;
+    v_id_address INTEGER;
+    v_nipcount INTEGER;
+    wNIP EXCEPTION;
+BEGIN
+    -- Sprawdzenie unikalności numeru NIP firmy
+    SELECT COUNT(*) INTO v_nipcount
+    FROM klienci
+    WHERE nip = p_nip;
+
+    IF v_nipcount > 0 THEN
+        RAISE wNIP;
+    END IF;
+
+    -- Uzyskanie kolejnego identyfikatora klienta za pomocą sekwencji
+    SELECT MAX(id_klienta) + 1 INTO v_id_klienta FROM klienci;
+
+    -- Uzyskanie kolejnego identyfikatora adresu
+    SELECT MAX(id_address) + 1 INTO v_id_address FROM adres_klienci;
+
+    -- Dodanie adresu
+    INSERT INTO adres_klienci (id_address, city, street, post_code)
+    VALUES (v_id_address, p_city, p_street, p_postal_code)
+    RETURNING id_address INTO v_id_address;
+
+    -- Dodanie klienta
+    INSERT INTO klienci (id_klienta, co_name, ceo, nip, building_no, id_address)
+    VALUES (v_id_klienta, p_co_name, p_ceo, p_nip, p_building_no, v_id_address);
+
+    COMMIT;
+
+    EXCEPTION WHEN wNIP THEN DBMS_OUTPUT.PUT_LINE('Podany NIP już istenieje w bazie danych!');
+
+END ADD_CLIENT;
+/
+
+
+
+
+
+
+
+
+
+
+create or replace PROCEDURE REFILL(p_towar_id IN INTEGER, p_quantity IN INTEGER) 
+IS 
+	v_ex_mg_quantity INTEGER; 
+	v_ex_t_quantity INTEGER; 
+BEGIN 
+    IF CheckMissingGoods(p_towar_id) THEN 
+		SELECT quantity INTO v_ex_mg_quantity FROM Missing_Goods WHERE towar_id_towaru = p_towar_id; 
+        UPDATE Missing_Goods SET quantity = v_ex_mg_quantity - p_quantity WHERE towar_id_towaru = p_towar_id; 
+ 
+		SELECT quantity INTO v_ex_t_quantity FROM towar_quantity WHERE towar_id_towaru = p_towar_id; 
+        UPDATE towar_quantity SET quantity = quantity + p_quantity WHERE towar_id_towaru = p_towar_id; 
+ 
+        apex_application.g_print_success_message := '<span style="color:white">Ilość towaru na stanie została zaktualizowana!</span>'; 
+    ELSE 
+        UPDATE towar_quantity SET quantity = quantity + p_quantity WHERE towar_id_towaru = p_towar_id; 
+         
+        apex_application.g_print_success_message := '<span style="color:white">Ilość towaru na stanie została zaktualizowana!</span>'; 
+    END IF; 
+END REFILL; 
+/
+
+
+
+
+
+
+
+
+
+
+create or replace PROCEDURE REFILL_PRODUCT(p_missing_product IN VARCHAR2, p_quantity IN INTEGER) 
+IS 
+	towar_id INTEGER; 
+	existing_quantity INTEGER; 
+	v_message VARCHAR2(50 CHAR); 
+BEGIN 
+	SELECT t.id_towaru INTO towar_id FROM towar t WHERE t.name = p_missing_product; 
+ 
+    IF check_quantity(towar_id, p_quantity) THEN 
+		--Pobierz aktualną ilość towaru na stanie  
+		SELECT quantity INTO existing_quantity FROM towar_quantity WHERE towar_id_towaru = towar_id; 
+		 
+        -- Dodaj ilość do tabeli towar_quantity 
+        UPDATE towar_quantity 
+		SET quantity = existing_quantity + p_quantity 
+		WHERE towar_id_towaru = towar_id; 
+ 
+        -- Usuń wpis z tabeli missing_goods 
+        DELETE FROM missing_goods WHERE towar_id_towaru = towar_id; 
+    ELSE 
+        -- Wyświetl komunikat o błędnej ilości 
+        APEX_ERROR.ADD_ERROR( 
+			p_message => 'Podano za małą ilość towaru! Potrzeba więcej.', 
+			p_display_location => APEX_ERROR.c_inline_in_notification); 
+    END IF; 
+END; 
+/
+
+
+
+
+
+
+
+
+
+
+create or replace PROCEDURE ADD_NEW_PRODUCT ( 
+    p_nazwa          IN VARCHAR2, 
+    p_ilosc          IN INTEGER, 
+    p_cena           IN NUMBER, 
+    p_cat_id         IN INTEGER DEFAULT NULL, 
+    p_type_id        IN INTEGER DEFAULT NULL, 
+    p_new_cat        IN VARCHAR2 DEFAULT NULL, 
+    p_new_type       IN VARCHAR2 DEFAULT NULL, 
+	 
+	p_prod_id		 IN INTEGER DEFAULT NULL, 
+	p_new_co_name	 IN VARCHAR2 DEFAULT NULL, 
+	p_new_nip		 IN VARCHAR2 DEFAULT NULL, 
+	p_new_city		 IN VARCHAR2 DEFAULT NULL, 
+	p_new_street	 IN VARCHAR2 DEFAULT NULL, 
+	p_new_bno		 IN INTEGER DEFAULT NULL, 
+	p_new_post_code	 IN VARCHAR2 DEFAULT NULL 
+) IS 
+    v_cat_id         INTEGER; 
+    v_type_id        INTEGER; 
+    v_new_cat_id     INTEGER; 
+    v_new_type_id    INTEGER; 
+    v_towar_id       INTEGER; 
+    v_prod_id        INTEGER; 
+    v_new_address    INTEGER; 
+	v_towar_validate INTEGER DEFAULT NULL; 
+	v_new_cat_validate INTEGER DEFAULT NULL; 
+	v_new_type_validate INTEGER DEFAULT NULL; 
+	v_new_co_name_validate INTEGER DEFAULT NULL; 
+	v_new_nip_validate INTEGER DEFAULT NULL; 
+BEGIN 
+    -- Sprawdzenie, czy produkt jest z istniejącej kategorii i istniejącego typu 
+    IF p_cat_id IS NOT NULL AND p_type_id IS NOT NULL AND p_new_cat IS NULL AND p_new_type IS NULL THEN 
+ 
+        -- Pobranie największego numeru ID w tabeli towar 
+        SELECT MAX(id_towaru) + 1 INTO v_towar_id FROM towar; 
+         
+		-- Sprawdzenie czy podany towar już nie istnieje w bazie danych 
+		BEGIN 
+			SELECT id_towaru INTO v_towar_validate FROM towar WHERE name = p_nazwa; 
+ 
+			EXCEPTION 
+				WHEN NO_DATA_FOUND THEN 
+					v_towar_validate := NULL; 
+		END; 
+ 
+		IF v_towar_validate IS NOT NULL THEN 
+			/*APEX_ERROR.ADD_ERROR( 
+				p_message => 'Podany produkt istnieje już w bazie danych!', 
+				p_display_location =>  APEX_ERROR.c_inline_in_notification 
+			);*/ 
+			RAISE_APPLICATION_ERROR(-20001, 'Podany towar istnieje już w bazie danych!'); 
+		ELSE 
+        	-- Wprowadzenie nowego produktu do tabeli towar 
+        	INSERT INTO towar (id_towaru, name) VALUES (v_towar_id, p_nazwa); 
+        END IF; 
+ 
+        -- Wprowadzenie ilości do tabeli towar_quantity 
+        INSERT INTO towar_quantity (quantity, towar_id_towaru) VALUES (p_ilosc, v_towar_id); 
+         
+        -- Wprowadzenie ceny do tabeli towar_cost 
+        INSERT INTO towar_cost (cost, towar_id_towaru) VALUES (p_cena, v_towar_id); 
+         
+        -- Wprowadzenie danych do tabeli towar_pr_t_c 
+        INSERT INTO towar_pr_t_c (towar_id_towaru, pr_type_cat_pr_cat_id_cat, pr_type_cat_pr_type_id_type) 
+        VALUES (v_towar_id, p_cat_id, p_type_id); 
+ 
+ 
+ 
+ 
+    -- Sprawdzenie, czy produkt jest z istniejącej kategorii, ale nowego typu 
+    ELSIF p_cat_id IS NOT NULL AND p_type_id IS NULL AND p_new_type IS NOT NULL AND p_new_cat IS NULL THEN 
+ 
+        -- Pobranie największego numeru ID w tabeli towar 
+        SELECT MAX(id_towaru) + 1 INTO v_towar_id FROM towar; 
+ 
+		-- Sprawdzenie czy podany nowy typ towaru już nie istnieje w bazie danych 
+		BEGIN 
+			SELECT id_type INTO v_new_type_validate FROM pr_type WHERE name = p_new_type; 
+ 
+			EXCEPTION 
+				WHEN NO_DATA_FOUND THEN 
+					v_new_type_validate := NULL; 
+		END; 
+ 
+		IF v_new_type_validate IS NOT NULL THEN 
+			RAISE_APPLICATION_ERROR(-20001, 'Podany typ już istnieje w bazie danych! Spróbuj ponowanie.'); 
+		ELSE 
+			SELECT MAX(id_type) + 1 INTO v_new_type_id FROM pr_type; 
+        	-- Wprowadzenie nowego typu do tabeli pr_type 
+        	INSERT INTO pr_type (id_type, name) VALUES (v_new_type_id, p_new_type); 
+		END IF; 
+ 
+		-- Sprawdzenie czy podany towar już nie istnieje w bazie danych 
+		BEGIN 
+			SELECT id_towaru INTO v_towar_validate FROM towar WHERE name = p_nazwa; 
+ 
+			EXCEPTION 
+				WHEN NO_DATA_FOUND THEN 
+					v_towar_validate := NULL; 
+		END; 
+ 
+		IF v_towar_validate IS NOT NULL THEN 
+			RAISE_APPLICATION_ERROR(-20001, 'Podany towar istnieje już w bazie danych!'); 
+		ELSE 
+        	-- Wprowadzenie nowego produktu do tabeli towar 
+        	INSERT INTO towar (id_towaru, name) VALUES (v_towar_id, p_nazwa); 
+        END IF; 
+         
+        -- Wprowadzenie ilości do tabeli towar_quantity 
+        INSERT INTO towar_quantity (quantity, towar_id_towaru) VALUES (p_ilosc, v_towar_id); 
+         
+        -- Wprowadzenie ceny do tabeli towar_cost 
+        INSERT INTO towar_cost (cost, towar_id_towaru) VALUES (p_cena, v_towar_id); 
+         
+		-- Wprowadzenie danych do tabeli pr_type_cat 
+		INSERT INTO pr_type_cat (pr_cat_id_cat, pr_type_id_type) VALUES (p_cat_id, v_new_type_id); 
+ 
+        -- Wprowadzenie danych do tabeli towar_pr_t_c 
+        INSERT INTO towar_pr_t_c (towar_id_towaru, pr_type_cat_pr_cat_id_cat, pr_type_cat_pr_type_id_type) 
+        VALUES (v_towar_id, p_cat_id, v_new_type_id); 
+ 
+ 
+ 
+ 
+    -- Sprawdzenie, czy produkt jest z nowej kategorii i nowego typu 
+    ELSIF p_cat_id IS NULL AND p_type_id IS NULL AND p_new_cat IS NOT NULL AND p_new_type IS NOT NULL THEN 
+        -- Pobranie największego numeru ID w tabeli towar 
+        SELECT MAX(id_towaru) + 1 INTO v_towar_id FROM towar; 
+ 
+        -- Pobranie największego numeru ID w tabeli pr_cat 
+        SELECT MAX(id_cat) + 1 INTO v_new_cat_id FROM pr_cat; 
+ 
+        -- Pobranie największego numeru ID w tabeli pr_type 
+        SELECT MAX(id_type) + 1 INTO v_new_type_id FROM pr_type; 
+ 
+		--Sprawdzenie czy podanej kategorii towaru nie ma już w bazie danych 
+		BEGIN 
+			SELECT id_cat INTO v_new_cat_validate FROM pr_cat WHERE cat_name = p_new_cat; 
+ 
+			EXCEPTION 
+				WHEN NO_DATA_FOUND THEN 
+					v_new_cat_validate := NULL; 
+		END; 
+ 
+		IF v_new_cat_validate IS NOT NULL THEN 
+			RAISE_APPLICATION_ERROR(-20001, 'Podana kategoria istnieje już w bazie danych! Spróbuj ponownie.'); 
+		ELSE 
+        	-- Wprowadzenie nowej kategorii do tabeli pr_cat 
+        	INSERT INTO pr_cat (id_cat, cat_name) VALUES (v_new_cat_id, p_new_cat); 
+		END IF; 
+         
+        -- Sprawdzenie czy podany nowy typ towaru już nie istnieje w bazie danych 
+		BEGIN 
+			SELECT id_type INTO v_new_type_validate FROM pr_type WHERE name = p_new_type; 
+ 
+			EXCEPTION 
+				WHEN NO_DATA_FOUND THEN 
+					v_new_type_validate := NULL; 
+		END; 
+ 
+		IF v_new_type_validate IS NOT NULL THEN 
+			RAISE_APPLICATION_ERROR(-20001, 'Podany typ już istnieje w bazie danych! Spróbuj ponowanie.'); 
+		ELSE 
+        	-- Wprowadzenie nowego typu do tabeli pr_type 
+        	INSERT INTO pr_type (id_type, name) VALUES (v_new_type_id, p_new_type); 
+		END IF; 
+         
+        -- Sprawdzenie czy podany towar już nie istnieje w bazie danych 
+		BEGIN 
+			SELECT id_towaru INTO v_towar_validate FROM towar WHERE name = p_nazwa; 
+ 
+			EXCEPTION 
+				WHEN NO_DATA_FOUND THEN 
+					v_towar_validate := NULL; 
+		END; 
+ 
+		IF v_towar_validate IS NOT NULL THEN 
+			RAISE_APPLICATION_ERROR(-20001, 'Podany towar istnieje już w bazie danych!'); 
+		ELSE 
+        	-- Wprowadzenie nowego produktu do tabeli towar 
+        	INSERT INTO towar (id_towaru, name) VALUES (v_towar_id, p_nazwa); 
+        END IF; 
+         
+        -- Wprowadzenie ilości do tabeli towar_quantity 
+        INSERT INTO towar_quantity (quantity, towar_id_towaru) VALUES (p_ilosc, v_towar_id); 
+         
+        -- Wprowadzenie ceny do tabeli towar_cost 
+        INSERT INTO towar_cost (cost, towar_id_towaru) VALUES (p_cena, v_towar_id); 
+         
+		-- Wprowadzenie danych do tabeli pr_type_cat 
+		INSERT INTO pr_type_cat (pr_cat_id_cat, pr_type_id_type) VALUES (v_new_cat_id, v_new_type_id); 
+ 
+        -- Wprowadzenie danych do tabeli towar_pr_t_c 
+        INSERT INTO towar_pr_t_c (towar_id_towaru, pr_type_cat_pr_cat_id_cat, pr_type_cat_pr_type_id_type) 
+        VALUES (v_towar_id, v_new_cat_id, v_new_type_id); 
+ 
+	ELSE 
+		RAISE_APPLICATION_ERROR(-20001, 'Nieoczekiwany błąd! INPR'); 
+    END IF; 
+     
+	IF p_prod_id IS NOT NULL THEN 
+        --Wprowadzenie danych do tabeli towar_producent 
+        INSERT INTO twoar_producent (towar_id_towaru, producent_id_prod) VALUES (v_towar_id, p_prod_id); 
+    ELSE 
+        -- Sprawdzenie unikalności nazwy firmy oraz jej nipu 
+        BEGIN 
+            SELECT id_prod INTO v_new_co_name_validate FROM producent WHERE co_name = p_new_co_name; 
+ 
+            EXCEPTION  
+                WHEN NO_DATA_FOUND THEN 
+                    v_new_co_name_validate := NULL; 
+        END; 
+        BEGIN 
+            SELECT nip INTO v_new_nip_validate FROM producent WHERE nip = p_new_nip; 
+ 
+            EXCEPTION 
+                WHEN NO_DATA_FOUND THEN 
+                    v_new_nip_validate := NULL; 
+        END; 
+ 
+        IF v_new_nip_validate IS NOT NULL OR v_new_co_name_validate IS NOT NULL THEN 
+            RAISE_APPLICATION_ERROR(-20001, 'Podana firma istnieje już w bazie danych! Spróbuj ponownie.'); 
+        ELSE 
+            SELECT MAX(id_prod) + 1 INTO v_prod_id FROM producent; 
+            SELECT MAX(id_address) + 1 INTO v_new_address FROM adres_pr; 
+ 
+            -- Dodanie nowego adresu producenta 
+            INSERT INTO adres_pr (id_address, city, street, post_code) VALUES (v_new_address, p_new_city, p_new_street, p_new_post_code); 
+ 
+            -- Dodanie nowego producenta do bazy danych 
+            INSERT INTO producent (id_prod, co_name, nip, building_no, id_address) VALUES (v_prod_id, p_new_co_name, p_new_nip, p_new_bno, v_new_address); 
+        END IF; 
+        INSERT INTO twoar_producent (towar_id_towaru, producent_id_prod) VALUES (v_towar_id, v_prod_id); 
+    END IF; 
+ 
+    COMMIT; 
+ 
+/*EXCEPTION 
+    WHEN OTHERS THEN 
+        RAISE_APPLICATION_ERROR(-20001, 'Wystąpił nieoczekiwany błąd!');*/ 
+END ADD_NEW_PRODUCT; 
+/
